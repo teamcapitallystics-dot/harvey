@@ -25,6 +25,8 @@ Hardening notes:
 """
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import random
@@ -306,6 +308,24 @@ class Scout:
             return str(value[0]) if value else ""
         return str(value) if value else ""
 
+    @staticmethod
+    def _unwrap_bing_href(href: str) -> str:
+        """Bing serves result links as ``bing.com/ck/a?...&u=a1<base64url>``
+        redirects; the real URL is the base64url text after ``a1``. Anything
+        else (a direct link, an undecodable ``u``) comes back unchanged."""
+        parsed = urlparse(href)
+        if not (parsed.netloc.endswith("bing.com") and parsed.path.startswith("/ck/")):
+            return href
+        u = parse_qs(parsed.query).get("u", [""])[0]
+        if not u.startswith("a1"):
+            return href
+        encoded = u[2:]
+        try:
+            real = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            return href
+        return real if real.startswith("http") else href
+
     # ── Search backend abstraction ──
 
     async def _web_search(self, query: str) -> list[tuple[str, str]]:
@@ -442,7 +462,7 @@ class Scout:
             snippet_el = item.select_one(".b_caption p")
             if not (link and link.get("href")):
                 continue
-            href = self._attr_str(link.get("href"))
+            href = self._unwrap_bing_href(self._attr_str(link.get("href")))
             snippet = snippet_el.get_text().strip() if snippet_el else ""
             if href.startswith("http"):
                 results.append((href, snippet))
