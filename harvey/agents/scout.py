@@ -57,6 +57,32 @@ SEARCH_BUDGET = {"profile": 1, "company": 2}
 # successive cycles walk the ICP instead of repeating its first entries.
 PROFILE_CURSOR_KEY = "scout_profile_query_cursor"
 COMPANY_CURSOR_KEY = "scout_company_query_cursor"
+
+# Company searches mostly return pages ABOUT companies — rankings, accelerator
+# portfolios, government programme pages, journal papers — not a company's
+# own site. These patterns spot them so Scout mines them for the companies
+# they link to instead of treating the list site as a prospect.
+# Government, academic and intergovernmental hosts publish lists, never sell.
+_INSTITUTIONAL_HOST = re.compile(
+    r"(^|\.)(gov|edu|mil|int)(\.[a-z]{2})?$|(^|\.)(ac|nic|gouv|gob|go)\.[a-z]{2}$"
+)
+# Words a list site puts in its own name (topstartups.io, startupdirectory...).
+_LIST_HOST_WORD = re.compile(r"startups|companies|directory|listing|journal|ranking")
+# Path segments of a list page (/startups/india, /companies/location/india).
+_LIST_PATH = re.compile(
+    r"/(startups?|companies|directory|directories|lists?|rankings?|top|best|portfolio"
+    r"|papers?|articles?|journals?)(/|$|-)|/(top|best|list-of)-"
+)
+# Snippet wording of a ranking or a paper ("Top 50 startups", "list of",
+# "International Journal of ...", "ISSN").
+_LIST_SNIPPET = re.compile(
+    r"\b(top|best)\s+\d+\b|\blist of\b|\bdirectory\b"
+    r"|\b\d{2,}\+?\s+(?:\w+\s+){0,3}(companies|startups|firms|agencies|businesses|brands)\b"
+    r"|\bjournal\b|\bissn\b|\bresearch paper\b|\bpeer[- ]reviewed\b",
+    re.IGNORECASE,
+)
+# A search hit that is a file, not a site: nothing to scrape or mine.
+_DOCUMENT_PATH = re.compile(r"\.(pdf|docx?|pptx?|xlsx?)$", re.IGNORECASE)
 # Delay between search requests (seconds)
 SEARCH_DELAY = (2, 5)
 
@@ -965,6 +991,26 @@ class Scout:
                 domain = self._extract_domain(url)
                 if not self._is_candidate_domain(domain):
                     continue
+                if self._is_document_url(url):
+                    continue
+
+                # A list of companies is not a company: mine it for the ones
+                # it links to. Checked before company_exists, so a list site
+                # stored as a company by an older Scout is still mined.
+                if self._looks_like_list_page(url, snippet):
+                    self._seen_domains.add(domain)
+                    for pc in await self._scrape_directory_page(url):
+                        pd = pc.get("domain", "")
+                        if not self._is_candidate_domain(pd) or self._is_list_host(pd):
+                            continue
+                        self._seen_domains.add(pd)
+                        if await self.state.company_exists(pd):
+                            continue
+                        companies.append(pc)
+                        if len(companies) >= 5:
+                            return companies
+                    continue
+
                 if await self.state.company_exists(domain):
                     self._seen_domains.add(domain)
                     continue
@@ -1947,6 +1993,28 @@ Respond ONLY with the JSON array."""
         except Exception:
             pass
         return ""
+
+    @staticmethod
+    def _is_list_host(domain: str) -> bool:
+        """A host that publishes lists of companies rather than being one."""
+        domain = domain.lower()
+        return bool(_INSTITUTIONAL_HOST.search(domain) or _LIST_HOST_WORD.search(domain))
+
+    @classmethod
+    def _looks_like_list_page(cls, url: str, snippet: str) -> bool:
+        """A search hit that lists companies (a ranking, a portfolio, a
+        government programme, a paper) instead of being a company's site."""
+        parsed = urlparse(url if "://" in url else f"http://{url}")
+        host = re.sub(r"^www\.", "", parsed.netloc.lower())
+        return bool(
+            cls._is_list_host(host)
+            or _LIST_PATH.search(parsed.path.lower())
+            or _LIST_SNIPPET.search(snippet or "")
+        )
+
+    @staticmethod
+    def _is_document_url(url: str) -> bool:
+        return bool(_DOCUMENT_PATH.search(urlparse(url).path))
 
     def _is_noise_domain(self, domain: str) -> bool:
         """Filter out domains that aren't actual companies."""
