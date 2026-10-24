@@ -27,6 +27,7 @@ Hardening notes:
 import asyncio
 import base64
 import binascii
+import itertools
 import json
 import logging
 import random
@@ -42,14 +43,20 @@ from harvey.config import HarveyConfig, EnvConfig
 from harvey.integrations.email_finder import find_email, verify_published_address
 from harvey.integrations.linkedin import LinkedInAutomation
 from harvey.models.company import Company
-from harvey.models.prospect import COMPANY_INBOX_SOURCE, Prospect
+from harvey.models.prospect import COMPANY_INBOX_SOURCE, PROFILE_SEARCH_SOURCE, Prospect
 from harvey.public_http import public_http_client
 from harvey.state import StateManager
 
 logger = logging.getLogger("harvey.scout")
 
-# Max queries per cycle to avoid rate limits
-MAX_QUERIES_PER_CYCLE = 3
+# Web searches per cycle, split by strategy. Profile search runs first, and
+# with one shared pool it spent every query before company discovery — the
+# only search path that ends in an email address — got a turn.
+SEARCH_BUDGET = {"profile": 1, "company": 2}
+# settings keys holding where each strategy's query rotation left off, so
+# successive cycles walk the ICP instead of repeating its first entries.
+PROFILE_CURSOR_KEY = "scout_profile_query_cursor"
+COMPANY_CURSOR_KEY = "scout_company_query_cursor"
 # Delay between search requests (seconds)
 SEARCH_DELAY = (2, 5)
 
@@ -129,6 +136,7 @@ class Scout:
         self.env = env
         self.skills = ""
         self._queries_this_cycle = 0
+        self._lane_queries: dict[str, int] = {}
         # In-memory dedup guards, reset each cycle.
         self._seen_prospect_keys: set[str] = set()
         self._seen_domains: set[str] = set()
@@ -139,6 +147,7 @@ class Scout:
 
         self.skills = self.brain.load_skills_for_agent("scout")
         self._queries_this_cycle = 0
+        self._lane_queries = {}
         self._seen_prospect_keys = set()
         self._seen_domains = set()
 
@@ -331,17 +340,40 @@ class Scout:
 
     # ── Search backend abstraction ──
 
-    async def _web_search(self, query: str) -> list[tuple[str, str]]:
+    def _search_budget_left(self, lane: str) -> bool:
+        return self._lane_queries.get(lane, 0) < SEARCH_BUDGET[lane]
+
+    async def _rotated(self, key: str, items: list) -> list:
+        """``items`` starting where the last cycle's rotation stopped."""
+        if not items:
+            return []
+        try:
+            start = int(await self.state.get_setting(key, "0")) % len(items)
+        except ValueError:
+            start = 0
+        return items[start:] + items[:start]
+
+    async def _advance(self, key: str, length: int):
+        """Move a rotation on by one, once its query has actually been spent."""
+        try:
+            current = int(await self.state.get_setting(key, "0"))
+        except ValueError:
+            current = 0
+        await self.state.set_setting(key, str((current + 1) % max(length, 1)))
+
+    async def _web_search(self, query: str, lane: str = "company") -> list[tuple[str, str]]:
         """Search the web using the best available backend.
 
         Returns list of (url, snippet) tuples.
         Tries backends in order: Serper API → DuckDuckGo → Bing → Google.
+        Each query counts against ``lane``'s share of SEARCH_BUDGET.
         """
-        if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
-            logger.info("Scout: Query limit reached for this cycle. Will continue next cycle.")
+        if not self._search_budget_left(lane):
+            logger.info(f"Scout: {lane} search budget spent for this cycle. Will continue next cycle.")
             return []
 
         self._queries_this_cycle += 1
+        self._lane_queries[lane] = self._lane_queries.get(lane, 0) + 1
 
         # Add a random delay between searches to be polite / avoid throttling.
         if self._queries_this_cycle > 1:
@@ -768,11 +800,16 @@ class Scout:
         logger.info("Scout: Searching for LinkedIn profiles...")
         count = 0
 
-        geo = self.config.icp.geography[0] if self.config.icp.geography else ""
-        industry = self.config.icp.industries[0] if self.config.icp.industries else ""
+        # Every (industry, city, title) once before any repeats, title
+        # turning fastest, then city, then industry.
+        combos = list(itertools.product(
+            self.config.icp.industries or [""],
+            self.config.icp.geography or [""],
+            self.config.icp.titles,
+        ))
 
-        for title in self.config.icp.titles:
-            if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
+        for industry, geo, title in await self._rotated(PROFILE_CURSOR_KEY, combos):
+            if not self._search_budget_left("profile"):
                 break
 
             query = f'site:linkedin.com/in "{title}"'
@@ -781,7 +818,8 @@ class Scout:
             if geo:
                 query += f' "{geo}"'
 
-            results = await self._web_search(query)
+            results = await self._web_search(query, lane="profile")
+            await self._advance(PROFILE_CURSOR_KEY, len(combos))
 
             for url, snippet in results:
                 if "/in/" not in url:
@@ -798,7 +836,7 @@ class Scout:
                     title=title,
                     seniority=self._infer_seniority(title),
                     industry=industry,
-                    source="web_search",
+                    source=PROFILE_SEARCH_SOURCE,
                     source_url=url,
                 )
 
@@ -915,11 +953,13 @@ class Scout:
         """Find ICP-matching companies via web search."""
         companies = []
 
-        for query in self._build_company_search_queries():
-            if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
+        queries = self._build_company_search_queries()
+        for query in await self._rotated(COMPANY_CURSOR_KEY, queries):
+            if not self._search_budget_left("company"):
                 break
 
-            results = await self._web_search(query)
+            results = await self._web_search(query, lane="company")
+            await self._advance(COMPANY_CURSOR_KEY, len(queries))
 
             for url, snippet in results:
                 domain = self._extract_domain(url)
@@ -965,10 +1005,10 @@ class Scout:
             ])
 
         for query in directory_queries:
-            if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
+            if not self._search_budget_left("company"):
                 break
 
-            results = await self._web_search(query)
+            results = await self._web_search(query, lane="company")
 
             for url, snippet in results:
                 for domain in self._extract_company_domains_from_snippet(snippet, url):
@@ -1086,9 +1126,7 @@ class Scout:
         geos = self.config.icp.geography or [""]
         size = self.config.icp.company_size or ""
 
-        for industry in industries[:2]:
-            geo = geos[0] if geos else ""
-
+        for industry, geo in itertools.product(industries, geos):
             parts = []
             if industry:
                 parts.append(f'"{industry}"')
@@ -1102,7 +1140,8 @@ class Scout:
             if geo and industry:
                 queries.append(f'top "{industry}" companies {geo}')
 
-        # Drop empties / dupes, cap to budget.
+        # Drop empties / dupes. The whole ICP grid comes back; callers
+        # rotate through it a few queries per cycle.
         seen = set()
         out = []
         for q in queries:
@@ -1110,7 +1149,7 @@ class Scout:
             if q and q != "company" and q not in seen:
                 seen.add(q)
                 out.append(q)
-        return out[:3]
+        return out
 
     async def _resolve_email(
         self, first_name: str, last_name: str, domain: str

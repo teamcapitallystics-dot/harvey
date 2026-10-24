@@ -78,6 +78,29 @@ async def test_a_day_of_unusable_prospects_pauses_spending_and_says_why(state):
 
 
 @pytest.mark.asyncio
+async def test_linkedin_names_alone_do_not_pause_company_search(state):
+    # Profile search saves a name and a LinkedIn link, never an email, so it
+    # spends no verifier credits. A day of those must not pause the company
+    # search that finds emails; a guessed address still counts.
+    from harvey.main import PROSPECT_BACKLOG, unusable_backlog_notice
+    from harvey.models.prospect import PROFILE_SEARCH_SOURCE
+    for n in range(PROSPECT_BACKLOG + 10):
+        await state.add_prospect(Prospect(
+            first_name=f"P{n}", last_name="Doe", title="Founder",
+            linkedin_url=f"https://in.linkedin.com/in/p{n}",
+            source=PROFILE_SEARCH_SOURCE,
+        ))
+    summary = await state.get_state_summary()
+    assert await decide_next_action(None, state, CONFIG, summary=summary) == "prospect"
+    assert unusable_backlog_notice(summary) == ""
+
+    for n in range(PROSPECT_BACKLOG):
+        await add(state, n, f"p{n}@co{n}.test", "guess")
+    summary = await state.get_state_summary()
+    assert await decide_next_action(None, state, CONFIG, summary=summary) == "idle"
+
+
+@pytest.mark.asyncio
 async def test_the_pause_never_becomes_permanent(state):
     # Nothing re-checks a guessed address, so an all-time count would stop
     # Scout for good. Once the guesses are a day old, prospecting resumes.

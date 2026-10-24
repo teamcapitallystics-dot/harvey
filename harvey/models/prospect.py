@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field, field_validator
 
 # Source tag for a prospect that is a company's general inbox, not a person.
 COMPANY_INBOX_SOURCE = "company_inbox"
+# Source tag for a LinkedIn profile found by web search: a name and a profile
+# link only. Scout never looks up an email for one.
+PROFILE_SEARCH_SOURCE = "web_search"
 
 
 def _utcnow() -> datetime:

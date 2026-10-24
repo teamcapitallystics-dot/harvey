@@ -18,7 +18,7 @@ from pathlib import Path
 import aiosqlite
 
 from harvey.models.company import Company
-from harvey.models.prospect import Prospect
+from harvey.models.prospect import PROFILE_SEARCH_SOURCE, Prospect
 from harvey.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep re-exported)
 from harvey.models.conversation import Conversation, Message  # noqa: F401
 
@@ -1726,7 +1726,12 @@ class StateManager:
                 return (await cursor.fetchone())[0]
 
     async def count_recent_unusable_prospects(self, hours: int = 24) -> int:
-        """New prospects found in the last ``hours`` that the Writer can't use."""
+        """New prospects found in the last ``hours`` that the Writer can't use.
+
+        A LinkedIn profile with no email is left out: no email was ever looked
+        up for it, so it spent no verifier credits, and counting it let
+        profile search alone pause the company search that does find emails.
+        """
         since = (_utcnow() - timedelta(hours=hours)).isoformat()
         marks = ",".join("?" for _ in WRITABLE_EMAIL_STATUSES)
         async with self._connect() as db:
@@ -1735,8 +1740,10 @@ class StateManager:
                     WHERE status = 'new'
                       AND NOT (COALESCE(email, '') != ''
                                AND COALESCE(email_status, '') IN ({marks}))
+                      AND NOT (COALESCE(email, '') = ''
+                               AND COALESCE(source, '') = ?)
                       AND datetime(created_at) >= datetime(?)""",
-                (*WRITABLE_EMAIL_STATUSES, since),
+                (*WRITABLE_EMAIL_STATUSES, PROFILE_SEARCH_SOURCE, since),
             ) as cursor:
                 return (await cursor.fetchone())[0]
 
