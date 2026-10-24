@@ -59,6 +59,9 @@ SCRAPE_TIMEOUT = 12.0
 MAX_RETRIES = 3
 BACKOFF_BASE = 1.5  # seconds; grows exponentially per attempt
 MAX_RESULTS_PER_QUERY = 20
+# Serper's free plan rejects any num above 10 with a 400 ("Query pattern not
+# allowed for free accounts").
+SERPER_RESULTS_PER_QUERY = 10
 MAX_COMPANIES_PER_CYCLE = 10
 
 # Company-inbox fallback: pages that publish a general address, and the
@@ -386,7 +389,7 @@ class Scout:
         resp = await self._fetch(
             "https://google.serper.dev/search",
             method="POST",
-            json_body={"q": query, "num": MAX_RESULTS_PER_QUERY},
+            json_body={"q": query, "num": SERPER_RESULTS_PER_QUERY},
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
             retries=2,
         )
