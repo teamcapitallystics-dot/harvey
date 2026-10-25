@@ -92,6 +92,14 @@ _SECOND_LEVEL_SUFFIX = {"co", "com", "net", "org", "gov", "ac", "edu", "ltd",
 _TOOL_LABEL = re.compile(
     r"^(forms?|docs|drive|sheets|calendar|meet|surveys?|share|links?|go|lnkd|wa|mail)$"
 )
+# A list page's link text is often the URL itself or a button label, which
+# then reached emails as "so https://btr.group sees..." or "Know More".
+_URL_LIKE_NAME = re.compile(r"^(https?://|www\.)|^[\w-]+(\.[\w-]+)+/?$", re.IGNORECASE)
+_GENERIC_LINK_TEXT = re.compile(
+    r"^(know|learn|read|see|view|find out) more$|^(visit|view|open|go to)( (the )?"
+    r"(site|website|page|profile))?$|^(website|homepage|click here|here|more|details|apply( now)?)$",
+    re.IGNORECASE,
+)
 # Delay between search requests (seconds)
 SEARCH_DELAY = (2, 5)
 
@@ -933,8 +941,17 @@ class Scout:
         all_contacts = []
         for company in companies:
             domain = company["domain"]
+            if not self._is_usable_company_name(company.get("name", "")):
+                # Mined from a list page under a URL or "Know More": use the
+                # name the site gives itself. The homepage fetch is reused
+                # for signals below.
+                info = await self._scrape_company_info(domain)
+                company = {**info, **{k: v for k, v in company.items() if v}, "name": info.get("name", "")}
+            name = company.get("name", "")
+            if not self._is_usable_company_name(name):
+                name = self._domain_to_name(domain)
             company_id = await self._ensure_company(
-                name=company.get("name") or self._domain_to_name(domain),
+                name=name,
                 domain=domain,
                 website=company.get("website", f"https://{domain}"),
                 description=company.get("description", ""),
@@ -957,7 +974,7 @@ class Scout:
             contacts = await self._contacts_from_company(
                 company_id=company_id,
                 domain=domain,
-                company_name=company.get("name") or self._domain_to_name(domain),
+                company_name=name,
                 industry=company.get("industry", default_industry),
                 signal_note=signal_note,
                 source="company_website",
@@ -1366,7 +1383,7 @@ Respond ONLY with the JSON array."""
             logger.debug(f"get_company_by_domain failed for {domain}: {e}")
 
         company = Company(
-            name=name,
+            name=name if self._is_usable_company_name(name) else self._domain_to_name(domain),
             domain=domain,
             website=website or f"https://{domain}",
             description=description,
@@ -1418,8 +1435,7 @@ Respond ONLY with the JSON array."""
             title_tag = soup.find("title")
             if title_tag:
                 title_text = title_tag.get_text().strip()
-                # Split on common separators to isolate the brand name.
-                name = re.split(r"[|—–\-:]", title_text)[0].strip()
+                name = self._brand_from_title(title_text, domain)
                 if name:
                     info["name"] = name[:120]
 
@@ -2032,6 +2048,28 @@ Respond ONLY with the JSON array."""
             return False
         compound = len(labels[-1]) == 2 and labels[-2] in _SECOND_LEVEL_SUFFIX
         return len(labels) == (3 if compound else 2)
+
+    @staticmethod
+    def _brand_from_title(title: str, domain: str) -> str:
+        """The brand in a page title. "Fintech & AI Partner | Innovify" puts
+        it last, "Kisan Network - Smart Deals" first: prefer the part that
+        matches the domain, else the first. A hyphen only separates parts
+        when spaced, so "Right-Hand Cybersecurity" stays whole."""
+        parts = [p.strip() for p in re.split(r"\s+[|—–:-]\s+|\s*[|—–]\s*", title) if p.strip()]
+        if not parts:
+            return ""
+        stem = re.sub(r"[^a-z0-9]", "", domain.lower().removeprefix("www.").split(".")[0])
+        for part in parts:
+            compact = re.sub(r"[^a-z0-9]", "", part.lower())
+            if stem and compact and (stem in compact or compact in stem):
+                return part
+        return parts[0]
+
+    @staticmethod
+    def _is_usable_company_name(name: str) -> bool:
+        """False for a URL, a bare domain or a button label posing as a name."""
+        name = (name or "").strip()
+        return bool(name) and not _URL_LIKE_NAME.match(name) and not _GENERIC_LINK_TEXT.match(name)
 
     @staticmethod
     def _is_document_url(url: str) -> bool:

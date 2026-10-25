@@ -148,3 +148,65 @@ async def test_a_list_site_stored_as_a_company_earlier_is_still_mined(state):
     scout = scout_with(state, [("https://www.failory.com/startups/india", "Indian startups")])
     domains = [c["domain"] for c in await scout._find_companies_via_search()]
     assert domains == ["tinyledger.in", "cashflowkit.io"]
+
+
+@pytest.mark.parametrize("name", [
+    "https://btr.group", "http://chat360.io/", "https://www.cipherschools.com",
+    "www.acme.in", "lilt.com", "Know More", "Visit website", "Learn more", "", "  ",
+])
+def test_urls_and_button_labels_are_not_company_names(name):
+    assert not Scout._is_usable_company_name(name)
+
+
+@pytest.mark.parametrize("name", ["BTR Group", "Chat360", "India Accelerator", "Zepto", "8Arms"])
+def test_real_company_names_are_kept(name):
+    assert Scout._is_usable_company_name(name)
+
+
+@pytest.mark.asyncio
+async def test_a_company_mined_under_its_url_gets_the_sites_own_name(state):
+    scout = Scout(None, state, SimpleNamespace(icp=ICP), SimpleNamespace(serper_api_key=""))
+    named = {}
+
+    async def found():
+        return [
+            {"name": "https://btr.group", "domain": "btr.group", "source": "directory"},
+            {"name": "Know More", "domain": "nameless.in", "source": "directory"},
+        ]
+
+    async def none():
+        return []
+
+    async def company_info(domain):
+        return {"name": "BTR Group" if domain == "btr.group" else "", "website": f"https://{domain}"}
+
+    async def no_signals(*args, **kwargs):
+        return ""
+
+    async def contacts(company_id, domain, company_name, **kwargs):
+        named[domain] = company_name
+        return []
+
+    scout._find_companies_via_search = found
+    scout._find_companies_via_directories = none
+    scout._scrape_company_info = company_info
+    scout._enrich_company_signals = no_signals
+    scout._contacts_from_company = contacts
+    await scout._prospect_via_company_discovery()
+
+    # The site's own name when it gives one, else one made from the domain.
+    assert named == {"btr.group": "BTR Group", "nameless.in": "Nameless"}
+    assert (await state.get_company_by_domain("btr.group")).name == "BTR Group"
+    assert (await state.get_company_by_domain("nameless.in")).name == "Nameless"
+
+
+@pytest.mark.parametrize("title,domain,brand", [
+    ("Fintech & AI Partner for Brands Adopting Fintech | Innovify", "innovify.com", "Innovify"),
+    ("Kisan Network - Smart Deals in your hand", "kisannetwork.com", "Kisan Network"),
+    ("Right-Hand Cybersecurity | Defend Against Social Engineering", "right-hand.ai", "Right-Hand Cybersecurity"),
+    ("Better | Product Development & Growth Team for Founders", "btr.group", "Better"),
+    ("MCS Chennai", "mcschennai.in", "MCS Chennai"),
+    ("", "lilt.com", ""),
+])
+def test_the_brand_is_taken_from_the_page_title(title, domain, brand):
+    assert Scout._brand_from_title(title, domain) == brand
