@@ -83,6 +83,15 @@ _LIST_SNIPPET = re.compile(
 )
 # A search hit that is a file, not a site: nothing to scrape or mine.
 _DOCUMENT_PATH = re.compile(r"\.(pdf|docx?|pptx?|xlsx?)$", re.IGNORECASE)
+# A list page links to much besides companies: forms, link redirects, docs
+# and app subdomains (forms.gle, ind01.safelinks.protection.outlook.com,
+# gsc.cars24.com). A company's own site is its bare registrable domain, so
+# a mined link must be exactly that, and not a tool by its first label.
+_SECOND_LEVEL_SUFFIX = {"co", "com", "net", "org", "gov", "ac", "edu", "ltd",
+                        "plc", "gen", "firm", "ind", "nic", "res", "or", "ne"}
+_TOOL_LABEL = re.compile(
+    r"^(forms?|docs|drive|sheets|calendar|meet|surveys?|share|links?|go|lnkd|wa|mail)$"
+)
 # Delay between search requests (seconds)
 SEARCH_DELAY = (2, 5)
 
@@ -1125,6 +1134,8 @@ class Scout:
                 domain = self._extract_domain(href)
                 if not domain or self._is_noise_domain(domain):
                     continue
+                if not self._is_site_root(domain):
+                    continue
                 if domain == page_domain or domain in seen_here:
                     continue
 
@@ -2011,6 +2022,16 @@ Respond ONLY with the JSON array."""
             or _LIST_PATH.search(parsed.path.lower())
             or _LIST_SNIPPET.search(snippet or "")
         )
+
+    @staticmethod
+    def _is_site_root(domain: str) -> bool:
+        """True for a bare registrable domain (acme.in, acme.co.in), not a
+        subdomain (gsc.acme.com) or a tool host (forms.gle)."""
+        labels = domain.lower().removeprefix("www.").split(".")
+        if len(labels) < 2 or _TOOL_LABEL.match(labels[0]):
+            return False
+        compound = len(labels[-1]) == 2 and labels[-2] in _SECOND_LEVEL_SUFFIX
+        return len(labels) == (3 if compound else 2)
 
     @staticmethod
     def _is_document_url(url: str) -> bool:

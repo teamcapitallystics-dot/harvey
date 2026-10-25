@@ -59,8 +59,27 @@ DIRECTORY_HTML = """
 <a href="https://tinyledger.in/">TinyLedger</a>
 <a href="https://linkedin.com/company/x">LinkedIn</a>
 <a href="https://startupindia.gov.in/">Startup India</a>
+<a href="https://forms.gle/AbC123">Apply here</a>
+<a href="https://ind01.safelinks.protection.outlook.com/?url=x">A link</a>
+<a href="https://gsc.bigco.com/">Big Co tool</a>
 <a href="https://cashflowkit.io/">CashflowKit</a>
 """
+
+
+@pytest.mark.parametrize("domain", [
+    "forms.gle", "ind01.safelinks.protection.outlook.com", "forms.cloud.microsoft",
+    "gsc.cars24.com", "docs.google.com", "co.in",
+])
+def test_tool_redirect_and_subdomain_hosts_are_not_company_sites(domain):
+    assert not Scout._is_site_root(domain)
+
+
+@pytest.mark.parametrize("domain", [
+    "8arms.ai", "rupeek.com", "acme.co.in", "acme.co", "www.razorpay.com",
+    "acme.com.au", "formspree.io",
+])
+def test_bare_company_domains_are_site_roots(domain):
+    assert Scout._is_site_root(domain)
 
 
 @pytest_asyncio.fixture
